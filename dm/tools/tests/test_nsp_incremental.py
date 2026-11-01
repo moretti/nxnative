@@ -441,6 +441,35 @@ class DlcOnlyShaders(Base):
                 self.assertEqual(nsp.dlc_only_shader_change(g, tables), want)
 
 
+class ModsOnlyShaders(Base):
+    def test_only_rows_the_mods_add_can_differ(self):
+        tables = self.tmp / 'new-tables'; tables.mkdir()
+        vs, ps = 'vs_layout.bin\t0\tvertex\tbase-vs\t/Pack/Bootup.pack/Layout/Common.sblarc/bgsh/__ArchiveShader.bnsh#BNSH@0x0#var0\n', 'ps_layout.bin\t0\tpixel\tbase-ps\t/Pack/Bootup.pack/Layout/Common.sblarc/bgsh/__ArchiveShader.bnsh#BNSH@0x0#var0\n'
+        mod = 'ps_layout.bin\t1\tpixel\tmod-ps\t/mods/PlayStation UI/Pack/Bootup.pack/Layout/Common.sblarc/bgsh/__ArchiveShader.bnsh#BNSH@0x0#var3\n'
+        facts = 'base-ps\t{"local":[8,1,1]}\n'
+        self.src.joinpath('shader_map.tsv').write_text(vs + ps)
+        self.src.joinpath('shader_facts.tsv').write_text(facts)
+        g = game.Game(self.src)
+        cases = [
+            ('a mod adds a shader', vs + ps + mod, facts, True),
+            ('the mod shaders move the registered indices', vs + mod + ps.replace('\t0\tpixel', '\t2\tpixel'), facts, True),
+            ('a mod shader with a fact of its own', vs + ps + mod, facts + 'mod-ps\t{"local":[4,1,1]}\n', True),
+            ('the same shaders as the profile', vs + ps, facts, False),
+            ('an added shader the mods do not source', vs + ps + mod.replace('/mods/PlayStation UI', '/v1114112'), facts, False),
+            ('a registered shader gone', vs + mod, facts, False),
+            ('a registered key changed', vs + ps.replace('\tbase-ps\t', '\tother\t') + mod, facts, False),
+            ('a registered source changed', vs + ps.replace('/Pack/', '/aoc/1/Pack/') + mod, facts, False),
+            ('a registered fact changed', vs + ps + mod, facts.replace('[8,1,1]', '[4,1,1]'), False),
+            ('a fact for a key nobody has', vs + ps + mod, facts + 'ghost\t{"local":[4,1,1]}\n', False),
+            ('invalid map', 'not a shader map\n', facts, False),
+        ]
+        for name, shader_map, new_facts, want in cases:
+            with self.subTest(name=name):
+                tables.joinpath('shader_map.tsv').write_text(shader_map)
+                tables.joinpath('shader_facts.tsv').write_text(new_facts)
+                self.assertEqual(nsp.mods_only_shader_change(g, tables), want)
+
+
 class ComputeReaderAdditions(Base):
     V, P, C = 'a' * 16, 'b' * 16, 'c' * 16
     SOURCE = '/payload#Skinning#run.0'

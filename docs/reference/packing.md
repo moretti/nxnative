@@ -187,6 +187,13 @@
 - **Fix:** `build_folder` in `scripts/build_ipa_from_nsp.py` gives a program packed with the first `<work dir>/programs/<id>_build` under `--work-dir`; the first program, a game of one program and `--program N` alone keep the folder as named. Test: `test_nsp_build_folder.py`.
 - **Found on:** [Super Mario 3D All-Stars](../../dm/games/010049900F546000/README.md#found-on-this-game), 1.1.4, built by NX2Apple 1.2.1 as one IPA.
 
+### A RomFS mod's layout archives carry their own shaders
+
+- **Symptom:** with a UI mod packed from `<NSP folder>/mods`, HUD panes are missing (Breath of the Wild's stamina wheel all but a small red arc), and the log has `[RED] shader … is not in the shader map` for a dozen keys and `program has no vertex shader (or it is not mapped)`; the layouts themselves are the game's.
+- **Cause:** an nn::ui2d layout archive holds the shader its layouts draw with (`bgsh/__ArchiveShader.bnsh`, 22 variations in Breath of the Wild's `Pack/Bootup.pack/Layout/Common.sblarc`), and the layout editor writes it again when a mod saves the archive: the mod's 22 keys differed from the game's 22, including both vertex shaders. The split made the shader tables from the game's own files, so the mod's keys were in no table, `prog_get` had no stage for them and `pso_get_` built no pipeline: every draw of the modded archive's layouts was dropped (the stamina wheel's layout, `PaGanbariGauge_01`, was unchanged; only its shader was).
+- **Fix:** the mods' `romfs` folders are extra roots of the shader split (`shader_split.py`'s ninth argument, scanned after the game's files, their keys sourced `/mods/<name>/…`), and when the split's tables are the registered ones plus rows the mods source (`mods_only_shader_change`), the build goes on with a shader-only derived profile that holds them (`derive_shader_tables`, as DLC-only differences do), so the shader build translates them and the app ships them. The mods' files are split inputs (`('mod', name)` and their stat), so an updated mod splits again; a mod without shaders changes nothing. `test_nsp_incremental.py` `ModsOnlyShaders` covers the comparison.
+- **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game) 1.9.0 with the PlayStation button layout mod (`Layout/Common.sblarc` is its one changed member of `Bootup.pack`: 42 layouts and animations, and the archive shader), on an M5 Pro Mac; the 14 keys the run reported were all among the mod's 22.
+
 ## Add-on content
 
 ### DLC in Documents is ignored or removed DLC remains installed
