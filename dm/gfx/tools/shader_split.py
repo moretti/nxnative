@@ -62,7 +62,7 @@
 # Output: <package dir>/<stage>_<source group>.bin, each record = 'BTCDBTCD' + header (+0x08 the key's 8 bytes, +0x28 control length, +0x2c code length) padded to 0x38 + code area + control section, one copy per key
 #   (dmsh_build.py finds a map row's record by that key, not by the row's index: a package from another split than the map stops it instead of translating a neighbour's bytes, issue #1841);
 #   map rows have the same columns as D2R's shader_map.tsv (column 5 names the source chosen for the key); the answer table has one row per compute shader {"local", "shared"} (shared memory rounded up to 16 bytes, as D2R did).
-# Usage: shader_split.py <RomFS dir> <ExeFS main> <output package dir> <output map> <output answer table> [<output pair table> (geo_pairs.tsv is written beside it) [<output pipeline pair table (pso_pairs.tsv)> [<DLC RomFS dirs, comma-separated> [<play capture file list, JSON>]]]]   Environment J=concurrency (default 8)
+# Usage: shader_split.py <RomFS dir> <ExeFS main> <output package dir> <output map> <output answer table> [<output pair table> (geo_pairs.tsv is written beside it) [<output pipeline pair table (pso_pairs.tsv)> [<DLC RomFS dirs, comma-separated> [<play capture file list, JSON, or ''> [<RomFS mod dirs, comma-separated>]]]]]   Environment J=concurrency (default 8)
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
 #   Unity type trees need Unity's common string table, which is taken from the first main
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
@@ -4040,7 +4040,7 @@ def scan_blob(d, label, out, depth=0, left=None):
 def merge_keys(results, registered: dict[tuple[str, str], str] | None = None):
     """Merge checked copies, keeping a verified registered source when available.
 
-    The game's copy takes precedence over DLC, and play captures cannot take an existing key.
+    The game's copy takes precedence over DLC; play captures and RomFS mods (/mods/<name>/, scanned after the game's files) cannot take an existing key.
     Otherwise keep the first copy unless the registered key, stage and source occur in the scan.
     """
     keys, preferred, pairs = {}, {}, set()
@@ -4052,7 +4052,7 @@ def merge_keys(results, registered: dict[tuple[str, str], str] | None = None):
                 continue
             old = keys[key]
             if not same_shader(old[2:4], v[2:4]): red(f'key {key} is the same but the control section or code area differs ({v[0]} / {old[0]})')
-            if old[0].startswith('/aoc/') and not v[0].startswith(('/aoc/', '/glslc_play/')):
+            if old[0].startswith('/aoc/') and not v[0].startswith(('/aoc/', '/glslc_play/', '/mods/')):
                 keys[key] = v
             elif registered and v[0] != old[0] and registered.get((key, STAGE_NAME[v[1]])) == v[0]:
                 preferred.setdefault(key, v)
@@ -4060,7 +4060,7 @@ def merge_keys(results, registered: dict[tuple[str, str], str] | None = None):
     # occurrence cannot mask a conflicting copy or override game/DLC precedence.
     for key, v in preferred.items():
         old = keys[key]
-        if v[1] == old[1] and not v[0].startswith('/glslc_play/') and v[0].startswith('/aoc/') == old[0].startswith('/aoc/'):
+        if v[1] == old[1] and not v[0].startswith(('/glslc_play/', '/mods/')) and v[0].startswith('/aoc/') == old[0].startswith('/aoc/'):
             keys[key] = v
     per_src = collections.Counter(group(shader[0]) for shader in keys.values())
     return keys, pairs, per_src
@@ -4719,6 +4719,7 @@ def main():
     pairsout = sys.argv[6] if len(sys.argv) > 6 else None
     psopairsout = sys.argv[7] if len(sys.argv) > 7 else None   # pso_pairs.tsv: supplemental BAHS program variations and legacy Unity pass-input covers
     dlc_v = sys.argv[8].split(',') if len(sys.argv) > 8 and sys.argv[8] else []   # extra content has no ExeFS; each root is the extracted DLC index
+    mod_v = sys.argv[10].split(',') if len(sys.argv) > 10 and sys.argv[10] else []   # RomFS mods (<mod>/romfs folders the NSP script lays over the game files): their files hold shaders too (a UI layout mod carries its archive's recompiled shader)
     # Several versions (base game + update): the RomFS and main arguments are comma-separated and paired one to one; the output is their union (keys are content hashes, shaders shared by versions appear once).
     # The first version's source column is unchanged; later versions are prefixed with their workspace directory name (e.g. v327680): /v327680/Shader/…, main@v327680. They sort after the first version, so existing rows keep their package indices.
     romfs_v, main_v = romfs_l.split(','), main_l.split(',')
@@ -4760,7 +4761,12 @@ def main():
         name = os.path.basename(os.path.normpath(romfs))
         tag = 'aoc/' + (name.removesuffix('.img') if is_image(romfs) else name)
         files += sorted((os.path.join(dp, f), tag + '/' + os.path.relpath(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs)
-    zdicts = {k: v for r in romfs_v + dlc_v for k, v in zs_dicts(r).items()}   # Tears of the Kingdom's zstd dictionaries (zs_dicts)
+    # Mods come last: a shader a mod's file shares with the game's keeps the game's source, and the keys only a mod has are sourced /mods/<mod name>/<game path>, which
+    # build_ipa_from_nsp.py's mods_only_shader_change recognizes (the game's own rows stay as the profile registers them)
+    for romfs in mod_v:
+        tag = 'mods/' + os.path.basename(os.path.dirname(os.path.normpath(romfs)))   # <mod name>/romfs
+        files += sorted((os.path.join(dp, f), tag + '/' + os.path.relpath(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs)
+    zdicts = {k: v for r in romfs_v + dlc_v + mod_v for k, v in zs_dicts(r).items()}   # Tears of the Kingdom's zstd dictionaries (zs_dicts)
     # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
     J = int(os.environ.get('J', '8'))
     roots = romfs_v + dlc_v
@@ -4788,7 +4794,7 @@ def main():
     bad = [extra for *_, extra in results if isinstance(extra, tuple)]
     if bad: print(f'[RED] {sum(e[2] for e in bad)} file(s) could not be read, their shaders are left out (first: {bad[0][1]})', flush=True)   # build_ipa_from_nsp.py reads this line
     play_pairs = set()
-    if len(sys.argv) > 9:
+    if len(sys.argv) > 9 and sys.argv[9]:
         played, play_pairs = glslc_play(sys.argv[9])
         results.append(('glslc_play', played, set(), {}))   # game files, boot captures and DLC retain ownership of any keys they share with play captures
     keys, pairs, per_src = merge_keys(results, registered)
