@@ -103,6 +103,74 @@ def pack(src, dst, reuse=False):
     return len(ents)
 
 
+def overlay(base, layers, dst, reuse=False):
+    """A copy of image base with the files of layer folders (LayeredFS mods' romfs folders) laid over it: a layer file replaces the image's file of the same path or adds one, later layers
+    win over earlier ones. Returns {guest path: layer folder} of the files taken from the layers. Reused like pack: while the base image, the layers' files and this packer are unchanged"""
+    base, dst = os.fspath(base), os.fspath(dst)
+    tree = {p: (d, None, o, s) for p, (d, o, s) in read_index(base).items()}   # path: (is dir, layer file or None, offset in base, size)
+    took = {}
+    for layer in map(os.fspath, layers):
+        for root, dirs, files in os.walk(layer):
+            dirs[:] = sorted(d for d in dirs if not d.startswith('.'))
+            rel = os.path.relpath(root, layer)
+            parts = [] if rel == '.' else [guest(os.path.dirname(os.path.join(layer, *rel.split(os.sep)[:i + 1])), x) for i, x in enumerate(rel.split(os.sep))]
+            for fn in sorted(f for f in files if not f.startswith('.')):
+                p = '/'.join(parts + [guest(root, fn)])
+                for i in range(1, len(p.split('/'))):
+                    d = '/'.join(p.split('/')[:i])
+                    if tree.get(d, (True,))[0] is False: raise ValueError(f'{layer}: {p} needs a directory where the image has the file {d}')
+                    tree.setdefault(d, (True, None, 0, 0))
+                if tree.get(p, (False,))[0]: raise ValueError(f'{layer}: {p} is a directory in the image')
+                h = os.path.join(root, fn); tree[p] = (False, h, 0, os.path.getsize(h)); took[p] = layer
+    h = hashlib.sha256(Path(__file__).read_bytes())
+    h.update(json.dumps([os.path.realpath(base), file_identity(base)] + [[p, file_identity(v[1])] for p, v in sorted(tree.items()) if v[1]]).encode())
+    digest, stamp = h.hexdigest(), dst + '.inputs.json'
+    if reuse:
+        try:
+            if json.loads(Path(stamp).read_text()) == {'source': digest, 'image': file_identity(dst)}: return took
+        except (OSError, ValueError): pass
+    kids = {'': []}
+    for p in tree:
+        kids.setdefault(p.rpartition('/')[0], []).append(p)
+        if tree[p][0]: kids.setdefault(p, [])
+    ents = [['', True, 0, 0]]   # path, is dir, a, b: breadth-first with sorted children, as entries() numbers a folder
+    i = 0
+    while i < len(ents):
+        if ents[i][1]:
+            ch = sorted(kids[ents[i][0]], key=lambda q: q.rpartition('/')[2].encode())
+            ents[i][2], ents[i][3] = len(ents), len(ch)
+            ents.extend([q, tree[q][0], 0, 0] for q in ch)
+        i += 1
+    part = dst + '.part'
+    with open(base, 'rb') as src, open(part, 'wb') as out:
+        out.write(b'\0' * HEAD.size)
+        off = HEAD.size
+        for e in ents:
+            if e[1]: continue
+            _, host, at, n = tree[e[0]]
+            f = open(host, 'rb') if host else src
+            try:
+                if not host: f.seek(at)
+                left = n
+                while left:
+                    b = f.read(min(left, 8 << 20))
+                    if not b: raise RuntimeError(f'{host or base}: cut off while copying {e[0]}')
+                    out.write(b); left -= len(b)
+            finally:
+                if host: f.close()
+            e[2], e[3] = off, n; off += n
+        pool, idx = bytearray(), bytearray()
+        for p, isdir, a, b in ents:
+            name = p.rpartition('/')[2].encode()
+            idx += ENT.pack(a, b, len(pool), len(name), 0 if isdir else 1, 0); pool += name
+        out.write(idx); out.write(pool)
+        out.seek(0); out.write(HEAD.pack(MAGIC, off, len(idx) + len(pool), len(ents)))
+    os.replace(part, dst)
+    Path(stamp + '.part').write_text(json.dumps({'source': digest, 'image': file_identity(dst)}))
+    os.replace(stamp + '.part', stamp)
+    return took
+
+
 def read_index(img):   # for tests and checks: {guest path: (is dir, offset, size)}
     with open(img, 'rb') as f:
         magic, ioff, isz, n = HEAD.unpack(f.read(HEAD.size))

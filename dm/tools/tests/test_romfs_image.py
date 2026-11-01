@@ -121,6 +121,27 @@ class Images(unittest.TestCase):
         env['ROMFS_PUSH_RC'] = '7'; result = push()
         self.assertEqual(result.returncode, 7); self.assertNotIn('game files on the phone', result.stdout)
 
+    def test_overlay_matches_packing_the_merged_folder(self):
+        for name, data in (('Pack/Bootup.pack', b'stock'), ('Font/US.bfarc', b'font'), ('Font/EU.bfarc', b'eu'), ('System/x', b'x')):
+            (self.src / name).parent.mkdir(parents=True, exist_ok=True); (self.src / name).write_bytes(data)
+        (self.src / 'empty').mkdir()
+        base = self.root / 'base.img'; image.pack(self.src, base)
+        a, b = self.root / 'a/romfs', self.root / 'b/romfs'
+        for layer, name, data in ((a, 'Pack/Bootup.pack', b'mod a'), (a, 'Font/US.bfarc', b'a font'), (b, 'Font/US.bfarc', b'b font'), (b, 'New/added', b'new'), (b, '.DS_Store', b'junk')):
+            (layer / name).parent.mkdir(parents=True, exist_ok=True); (layer / name).write_bytes(data)
+        took = image.overlay(base, [a, b], self.dst)
+        self.assertEqual(took, {'Pack/Bootup.pack': str(a), 'Font/US.bfarc': str(b), 'New/added': str(b)})
+        for name, data in (('Pack/Bootup.pack', b'mod a'), ('Font/US.bfarc', b'b font'), ('New/added', b'new')): (self.src / name).parent.mkdir(exist_ok=True); (self.src / name).write_bytes(data)
+        merged = self.root / 'merged.img'; image.pack(self.src, merged)
+        self.assertEqual(self.dst.read_bytes(), merged.read_bytes()); self.assertTrue(self.valid())
+        before = image.file_identity(self.dst)
+        image.overlay(base, [a, b], self.dst, reuse=True); self.assertEqual(image.file_identity(self.dst), before)
+        (b / 'New/added').write_bytes(b'newer')
+        image.overlay(base, [a, b], self.dst, reuse=True); self.assertEqual(self.content('New/added'), b'newer')
+        (a / 'System/x').mkdir(parents=True)
+        (a / 'System/x/y').write_bytes(b'y')
+        with self.assertRaises(ValueError): image.overlay(base, [a], self.root / 'bad.img')
+
     def test_case_collision_guest_names(self):
         if not shutil.which('xattr'): self.skipTest('macOS xattr tool required')
         (self.src / 'a').write_bytes(b'lower')
