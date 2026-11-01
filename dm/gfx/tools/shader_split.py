@@ -2656,6 +2656,7 @@ def main():
     pairsout = sys.argv[6] if len(sys.argv) > 6 else None
     psopairsout = sys.argv[7] if len(sys.argv) > 7 else None   # pso_pairs.tsv: supplemental BAHS program variations and legacy Unity pass-input covers
     dlc_v = sys.argv[8].split(',') if len(sys.argv) > 8 and sys.argv[8] else []   # extra content has no ExeFS; each root is the extracted DLC index
+    mod_v = sys.argv[9].split(',') if len(sys.argv) > 9 and sys.argv[9] else []   # RomFS mods (<mod>/romfs folders the NSP script lays over the game files): their files hold shaders too (a UI layout mod carries its archive's recompiled shader)
     # Several versions (base game + update): the RomFS and main arguments are comma-separated and paired one to one; the output is their union (keys are content hashes, shaders shared by versions appear once).
     # The first version's source column is unchanged; later versions are prefixed with their workspace directory name (e.g. v327680): /v327680/Shader/…, main@v327680. They sort after the first version, so existing rows keep their package indices.
     romfs_v, main_v = romfs_l.split(','), main_l.split(',')
@@ -2691,7 +2692,12 @@ def main():
         name = os.path.basename(os.path.normpath(romfs))
         tag = 'aoc/' + (name.removesuffix('.img') if is_image(romfs) else name)
         files += sorted((os.path.join(dp, f), tag + '/' + os.path.relpath(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs)
-    zdicts = {k: v for r in romfs_v + dlc_v for k, v in zs_dicts(r).items()}   # Tears of the Kingdom's zstd dictionaries (zs_dicts)
+    # Mods come last: a shader a mod's file shares with the game's keeps the game's source, and the keys only a mod has are sourced /mods/<mod name>/<game path>, which
+    # build_ipa_from_nsp.py's mods_only_shader_change recognizes (the game's own rows stay as the profile registers them)
+    for romfs in mod_v:
+        tag = 'mods/' + os.path.basename(os.path.dirname(os.path.normpath(romfs)))   # <mod name>/romfs
+        files += sorted((os.path.join(dp, f), tag + '/' + os.path.relpath(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs)
+    zdicts = {k: v for r in romfs_v + dlc_v + mod_v for k, v in zs_dicts(r).items()}   # Tears of the Kingdom's zstd dictionaries (zs_dicts)
     keys = {}
     # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
     J = int(os.environ.get('J', '8'))

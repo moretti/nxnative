@@ -1736,6 +1736,37 @@ def dlc_only_shader_change(g, tables):
     except (OSError, UnicodeError, ValueError): return False
 
 
+def mods_only_shader_change(g, tables):
+    """The RomFS mods added shaders, and nothing else changed: every registered row and fact is in the split's tables as it was (package indices aside, which the added rows
+    move), and every added row is sourced /mods/<name>/ (shader_split.py scans the mods' files after the game's, so a shader a mod shares with the game keeps the game's source).
+    A UI layout mod carries its layout archive's recompiled shader (nn::ui2d's __ArchiveShader.bnsh), which no registered table has: without its rows the host drops every
+    draw of the modded layouts (Breath of the Wild's HUD under a PlayStation button layout mod, dm/games/01007EF00011E000/README.md). A module or game-file shader difference never qualifies"""
+    def rows(path):
+        out = {}
+        for line in path.read_text().splitlines():
+            if not line.strip() or line.startswith(('#', 'package\t')): continue
+            c = line.split('\t')
+            if len(c) != 5 or not c[0].endswith('.bin') or c[3] in out: raise ValueError('invalid shader map')
+            out[c[3]] = (c[0], c[2], c[4])
+        return out
+    def facts(path):
+        out = {}
+        for line in path.read_text().splitlines():
+            if not line.strip() or line.startswith('#'): continue
+            c = line.split('\t', 1)
+            if len(c) != 2 or c[0] in out: raise ValueError('invalid shader facts')
+            out[c[0]] = c[1]
+        return out
+    try:
+        old, new = rows(g.table('shader_map.tsv')), rows(tables / 'shader_map.tsv')
+        added = new.keys() - old.keys()
+        if not added or any(new.get(k) != v for k, v in old.items()): return False
+        if any(not new[k][2].startswith('/mods/') for k in added): return False
+        before, after = facts(g.table('shader_facts.tsv')), facts(tables / 'shader_facts.tsv')
+        return after.keys() - before.keys() <= added and all(after.get(k) == v for k, v in before.items())
+    except (OSError, UnicodeError, ValueError): return False
+
+
 def compute_reader_additions(g, tables, split_log):
     """Only newly decoded Unity ComputeShader kernels, preserving every registered shader, fact and evidence pair.
     Called for registered module builds only. Package indices may move when the new kernels sort among old entries;
@@ -1783,12 +1814,14 @@ def compute_reader_additions(g, tables, split_log):
     except (OSError, UnicodeError, ValueError): return False
 
 
-def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, oodle=None, dlc_roms=(), derive_dlc=None, derive_compute=None):
+def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, oodle=None, dlc_roms=(), derive_dlc=None, derive_compute=None, mod_roots=(), derive_mods=None):
     """The shader split into pkg, checked against the profile's tables. The package is reused when the extractor and the modules it imports, the profile settings and tables it reads or is checked against,
-    the DLC RomFS roots, each version's modules, RomFS (paths and sizes) and run-time capture, and the package's own contents are as at the last successful split. Returns the package's content key, the shader build's input (None for damaged files, which never reuse them): a split that runs
+    the DLC RomFS roots, the mods' files, each version's modules, RomFS (paths and sizes) and run-time capture, and the package's own contents are as at the last successful split. Returns the package's content key, the shader build's input (None for damaged files, which never reuse them): a split that runs
     again because a reader of another engine changed writes the same package, and the iOS shaders stay reused.
     oodle: for decoder-backed packs, builds or reuses the Mac host and returns DM_OODLE_HOST / DM_OODLE_MODULES. Verified host provenance ignores only its chain label;
-    unknown hosts use their bytes, and rewritten modules are always content inputs. Both macOS and iOS builds share this extraction cache."""
+    unknown hosts use their bytes, and rewritten modules are always content inputs. Both macOS and iOS builds share this extraction cache.
+    mod_roots: the RomFS mods' romfs folders (mod_layers), scanned after the game's files: a mod's shaders the game lacks (a UI layout mod's recompiled archive shader) are added
+    under /mods/<name>/ sources, and derive_mods makes the shader-only derived profile that holds them (mods_only_shader_change), as derive_dlc does for DLC"""
     names = ('shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv')
     PROG.stage('shader split', step='checking the inputs')   # then the count of files and archive ranges scanned (shader_split.py's progress lines); the package and tables come at the end
     kf, outputkf = pkg.with_name(pkg.name + '.key'), pkg.with_name(pkg.name + '.outputs.key')
@@ -1799,6 +1832,7 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
             capture = Path(env.get(setting) or r.parent / folder)
             inputs += [('stat', capture) if provisional else ('files', sorted(capture.glob(pattern)))]   # its files, not where it is: the same build reached through a moved folder or a link keeps its split
     inputs += [item for r in dlc_roms for item in (('dlc', Path(r).name), ('stat', r))]   # DLC has no registered module build to pin its contents: include its index and re-extraction times, even when file sizes stay the same
+    inputs += [item for r in mod_roots for item in (('mod', Path(r).parent.name), ('stat', r))]   # a mod's files change in place (an updated mod keeps its paths): their times too
     if oodle:   # a host or rewriter fix can change what the game's decoder produces
         PROG.set(step='building the Mac host for the game\'s Oodle decoder'); env = dict(env, **oodle())
         host = Path(env['DM_OODLE_HOST'])
@@ -1806,6 +1840,7 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     key = None if ALLOW_DAMAGED else fingerprint(*inputs, *split_profile_inputs(g))
     dlckf, dlckey = pkg.with_name(pkg.name + '.dlc.key'), None
     cskf, cskey, promoted = pkg.with_name(pkg.name + '.compute.key'), None, None
+    modskf, modskey = pkg.with_name(pkg.name + '.mods.key'), None
     def promote(derive, kind):
         nonlocal g, provisional, env, promoted
         g, provisional, promoted = derive(), True, kind; inputs[1] = True
@@ -1814,6 +1849,11 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
         dlckey = fingerprint(key, ('files', [Path(__file__)])) if key else None   # proof pins the comparison code as well as the registered tables and every split input
         if dlckey and reused(dlckf, dlckey) is not None:
             promote(derive_dlc, 'dlc')
+            key = fingerprint(*inputs, *split_profile_inputs(g))
+    if not provisional and derive_mods and mod_roots:
+        modskey = fingerprint(key, ('files', [Path(__file__)])) if key else None
+        if modskey and reused(modskf, modskey) is not None:
+            promote(derive_mods, 'mods')
             key = fingerprint(*inputs, *split_profile_inputs(g))
     if not provisional and derive_compute:
         cskey = fingerprint(key, ('files', [Path(__file__)])) if key else None
@@ -1827,7 +1867,8 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     tmp = pkg.with_name(pkg.name + '.partial'); rmtree(tmp); (tmp / 'tables').mkdir(parents=True)
     def counted(ln):   # shader_split.py's 'progress: <done>/<total>'
         if m := re.fullmatch(r'progress: (\d+)/(\d+)', ln): PROG.set(done=int(m[1]), total=int(m[2]), unit='files')
-    run([py, repo / 'dm/gfx/tools/shader_split.py', ','.join(map(str, roms)), ','.join(map(str, mains)), tmp / 'pkg'] + [tmp / 'tables' / n for n in names + ('pso_pairs.tsv',)] + ([','.join(map(str, dlc_roms))] if dlc_roms else []),
+    run([py, repo / 'dm/gfx/tools/shader_split.py', ','.join(map(str, roms)), ','.join(map(str, mains)), tmp / 'pkg'] + [tmp / 'tables' / n for n in names + ('pso_pairs.tsv',)]
+        + ([','.join(map(str, dlc_roms))] if dlc_roms or mod_roots else []) + ([','.join(map(str, mod_roots))] if mod_roots else []),
         logs / 'shader_split.log', env=env, on_line=counted)
     text = (logs / 'shader_split.log').read_text(errors='replace')
     m = re.search(r'shaders: (\d+) \(', text)
@@ -1841,6 +1882,8 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     # package, where dmsh_build.py reads it too, so padding and the pipeline prebuild use the same pairs
     if not provisional and derive_dlc and dlc_only_shader_change(g, tmp / 'tables'):
         promote(derive_dlc, 'dlc')
+    if not provisional and derive_mods and mod_roots and mods_only_shader_change(g, tmp / 'tables'):
+        promote(derive_mods, 'mods')
     if not provisional and derive_compute and compute_reader_additions(g, tmp / 'tables', text):
         promote(derive_compute, 'compute')
     if provisional or g.table('pso_pairs.tsv').is_file(): names += ('pso_pairs.tsv',)
@@ -1859,6 +1902,8 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
         kf.write_text(f'{key}\n{note}\n')
     if promoted == 'dlc' and dlckey: dlckf.write_text(f'{dlckey}\nDLC-only shader content\n')
     else: rmtree(dlckf)
+    if promoted == 'mods' and modskey: modskf.write_text(f'{modskey}\nShaders added by RomFS mods\n')
+    else: rmtree(modskf)
     if promoted == 'compute' and cskey: cskf.write_text(f'{cskey}\nNewly decoded compute kernels\n')
     else: rmtree(cskf)
     PROG.end(note)
@@ -2355,17 +2400,23 @@ def parse_args(argv):
     return ap.parse_args(argv)
 
 
-def mod_romfs(nsp_dir, work, base):
-    """The RomFS the build packs: the extraction's image (base), or, with mods in <NSP folder>/mods, a copy with their files laid over it (romfs_image.overlay, in <id>_build/mods/RomFS.img;
-    reused while nothing changed). A mod is a folder as Eden / Yuzu load it, <name>/romfs/<game paths>; the mods apply in name order, a later one winning on the same file; a mod with a
-    file named .disabled is left out. Only the shipped game files change: the shaders were made from the game's own files, so a mod that replaces shader archives is not supported"""
+def mod_layers(nsp_dir):
+    """The romfs folders of the mods in <NSP folder>/mods, in the order they apply (a later one wins on the same file). A mod is a folder as Eden / Yuzu load it, <name>/romfs/<game paths>;
+    a mod with a file named .disabled is left out. They are the overlay's layers (mod_romfs) and extra roots of the shader split: the shaders a mod's files carry and the game's lack
+    (a UI layout mod's recompiled archive shader) go into a shader-only derived profile (split_shaders, mods_only_shader_change), so the host has their translations"""
     root = nsp_dir / 'mods'
     mods = sorted(d for d in root.iterdir() if d.is_dir() and not d.name.startswith('.')) if root.is_dir() else []
     for d in mods:
         if (d / '.disabled').exists(): say(f'mod {d.name}: disabled (.disabled), left out')
         elif not (d / 'romfs').is_dir(): say(f'[RED] mod {d.name}: no romfs folder in it (only RomFS mods are supported: {d.name}/romfs/...), left out')
         elif (d / 'exefs').is_dir(): say(f'[RED] mod {d.name}: its exefs folder is not supported, only its romfs is used')
-    layers = [d / 'romfs' for d in mods if (d / 'romfs').is_dir() and not (d / '.disabled').exists()]
+    return [d / 'romfs' for d in mods if (d / 'romfs').is_dir() and not (d / '.disabled').exists()]
+
+
+def mod_romfs(nsp_dir, work, base, layers=None):
+    """The RomFS the build packs: the extraction's image (base), or, with mods in <NSP folder>/mods (layers: mod_layers, found here when not given), a copy with their files laid over it
+    (romfs_image.overlay, in <id>_build/mods/RomFS.img; reused while nothing changed). Only the shipped game files change; the shaders the mods' files carry are the split's (mod_layers)"""
+    if layers is None: layers = mod_layers(nsp_dir)
     if not layers: return base
     if not rfs.is_image(base): raise BuildError(f'mods need the extraction as a RomFS image, but it is a folder ({base}): delete {work / "extract"} and build again')
     import romfs_image
@@ -2631,6 +2682,7 @@ def main(args=None):
     if glslc: capture_glslc(repo, {v: dirs[v] for v in sv}, pkg_ver, patched, work, env, logs, g)
     if uedec: decode_ue_shaders(repo, {v: dirs[v] for v in sv}, pkg_ver, patched, work, env, logs, g)
     sh = work / 'shader'
+    mod_roms = mod_layers(nsp_dir)   # the RomFS mods' files: shader split roots here, the overlay's layers at mod_romfs
     if gfx == 'vulkan':   # the packed version's merged RomFS holds the SPIR-V files the game loads; a capture holds those it generates
         cap = capture_shaders(repo, game, patched, work, env, logs, g, 'vk') if vkcap else None
         ios = build_vk_shaders(py, repo, [rfs.source(game)] + dlc_roms + ([cap] if cap else []), sh, env, logs, g, reuse=not ALLOW_DAMAGED, mac=mac, provisional=bool(provisional or derived))
@@ -2654,13 +2706,14 @@ def main(args=None):
             return g
         derive_dlc = (lambda: derive_shader_tables('the installed DLC shader content differs from the registered tables')) if not own else None
         derive_compute = (lambda: derive_shader_tables('the reader decoded additional compute kernels from this registered build')) if not own else None
-        pkey = split_shaders(py, repo, [rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute)
+        derive_mods = (lambda: derive_shader_tables('the mods in the NSP folder carry shaders the game files lack (a UI layout mod\'s recompiled archive shader)')) if not own else None
+        pkey = split_shaders(py, repo, [rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute, mod_roms, derive_mods)
         ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac)
     icon = next((d / 'icon.jpg' for d in (game, base) if (d / 'icon.jpg').exists()), None)   # the game icon nx_extract saved from the control data (English, icon.jpg); the packed version's first, then the base game's
     motion = MOTION if args.motion is None else args.motion
     env_file = build_env_file(work, args.env_file or DM_ENV_FILE, motion)
     if not motion: say('motion (gyro): off, DM_MOTION=0 is built in (on the iPhone, DM_MOTION=1 in the app\'s Documents/env.txt turns it back on)')
-    ship = mod_romfs(nsp_dir, work, rfs.source(game))   # the game files that go into the build: the extraction's, or with the mods in <NSP folder>/mods laid over them
+    ship = mod_romfs(nsp_dir, work, rfs.source(game), mod_roms)   # the game files that go into the build: the extraction's, or with the mods in <NSP folder>/mods laid over them
     if mac_pack:   # a Mac app: the Mac host, then the app packed from it and the build's files
         host, font = mac_host(py, repo, work, env, logs, g)
         if not icon: say('no game icon: a dump folder has no control data; the app\'s icon will be blank' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the app\'s icon will be blank')
