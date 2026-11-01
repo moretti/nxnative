@@ -447,6 +447,8 @@ class App(unittest.TestCase):
         self.assertEqual(p['DMSettings'], [])   # launcher.json's settings, as the saved choices they accept: none here
         self.assertRegex(p['DMCommit'], r'^[0-9a-f]{12}(\+dirty)?$')   # the packing checkout (scripts/bug_report.py, the host's start line)
         self.assertEqual(p['DMChain'], '0123456789ab')   # the chain of the libraries packed (msl/b-<chain>)
+        self.assertEqual(p['LSApplicationCategoryType'], 'public.app-category.entertainment')   # --category games: never a games category (no Game Mode)
+        self.assertEqual([pack_app.mac_category(c) for c in (None, 'public.app-category.action-games', 'public.app-category.entertainment')], ['public.app-category.entertainment'] * 3)
 
     def test_packed_language_is_the_lists(self):   # --lang a game lacks: the Game language row's default (settings.py: the game's first), with or without the window
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as d:

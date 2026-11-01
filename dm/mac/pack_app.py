@@ -111,11 +111,16 @@ def settings_rules(listed):   # DMSettings: what the launcher accepts as each se
     return rules
 
 
+def mac_category(category):   # a games category puts the app in macOS Game Mode, which collapses the GPU clock under the frame step (frame-rate.md, Game Mode)
+    category = category or 'public.app-category.games'
+    return 'public.app-category.entertainment' if category == 'public.app-category.games' or category.endswith('-games') else category
+
+
 def info_plist(a, minos, icon):
     p = {'CFBundleName': a.name, 'CFBundleDisplayName': a.name, 'CFBundleIdentifier': a.bundle_id or f'org.nxnative.{a.title_id.lower()}',
          'CFBundleVersion': a.version or '1.0', 'CFBundleShortVersionString': a.version or '1.0', 'CFBundlePackageType': 'APPL', 'CFBundleExecutable': EXE,
          'CFBundleInfoDictionaryVersion': '6.0', 'LSMinimumSystemVersion': minos, 'LSArchitecturePriority': ['arm64'], 'NSHighResolutionCapable': True,
-         'LSApplicationCategoryType': a.category or 'public.app-category.games', 'DMTitleID': a.title_id.upper(), 'DMRomfsMarker': a.marker or '', 'DMLanguage': a.lang or 'en-US'}
+         'LSApplicationCategoryType': mac_category(a.category), 'DMTitleID': a.title_id.upper(), 'DMRomfsMarker': a.marker or '', 'DMLanguage': a.lang or 'en-US'}
     if icon: p['CFBundleIconFile'] = 'AppIcon'
     if a.settings:
         listed = json.loads(Path(a.settings).read_text(encoding='utf-8'))['settings']
