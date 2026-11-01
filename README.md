@@ -70,6 +70,8 @@ brew install xcodegen zstd glslang
 python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'"
 ```
 
+With [uv](https://docs.astral.sh/uv/) (`brew install uv`) you can skip the `pip install`: in step 3, run `scripts/build_ipa_uv.sh` in place of `python3 scripts/build_ipa_from_nsp.py`, with the same options. It fetches the Python packages into uv's cache instead of your system Python.
+
 **2. Put your Switch 1 game in a folder.** Include any updates and DLC you want to pack. The script reads `.nsp`, `.xci`, `.nsz` and `.xcz` files.
 
 ```
