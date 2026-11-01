@@ -47,6 +47,10 @@ Mii heads and your own Miis come from your console, not from this project. Copy 
 
 Without them, Miis have no heads, and only the six default Miis are listed ([details](reference/services.md#a-consoles-own-mii-database-and-system-data)). When a game asks you to make a Mii, it gets the default Mii, kept in `system/host/` for every game ([details](reference/services.md#a-mii-made-in-the-editors-place)).
 
+## Mods
+
+RomFS mods (replaced or added game files: textures, layouts, fonts, text) go into the app when you pack it. Put each one in a `mods` folder in the NSP folder, as Eden or Yuzu load it: `mods/<name>/romfs/<the game's paths>`, for example `mods/PlayStation UI/romfs/Pack/Bootup.pack`. Every build lays their files over the game's (`<id>_build/mods/RomFS.img`, reused while nothing changed), for the Mac app, the IPA and a separate RomFS alike; the script names each mod and how many files it took. Mods apply in name order, a later one winning on the same file; an empty file named `.disabled` in a mod's folder leaves it out. `exefs` patches are not supported, and neither are mods that replace shaders (the shaders are made from the game's own files). Without rebuilding, `DM_ROMFS_OVERLAY=<folder>` in `env.txt` reads files from that folder first (the `romfs` folder itself).
+
 ## On the Mac
 
 A Mac app shows the game's settings in a window before the game starts ([The Mac settings window](settings.md#the-mac-settings-window)). Its `env.txt` is `~/Library/Application Support/nxnative/<title ID>/env.txt`, and its log is `~/Library/Logs/nxnative/<title ID>.log`. [NX2Apple](https://github.com/LNPANDY/NX2Apple)'s library can also start it with the settings you pick there.
