@@ -38,6 +38,10 @@ English by default. Pick another when packing with `--language` (`-l`), by code 
 
 Lines like `DM_OPMODE=0` (handheld mode: lower resolution, higher frame rate) in `Documents/env.txt` win over the settings screen, which then shows them greyed out ([the full list](settings.md#settings-in-a-file)). `DM_FPS_TARGET=30` keeps Breath of the Wild, Tears of the Kingdom, Octopath Traveler 0 and Octopath Traveler II at their original 30 fps, which saves battery; `DM_PRESENT_INTERVAL=game` does the same for Monster Train 2. `DM_SHOW_FPS=1` shows the frame rate at the top left (`--show-fps` when packing turns it on from the start). `DM_LAUNCHER=0` skips the settings screen.
 
+## Mods
+
+RomFS mods (replaced or added game files: textures, layouts, fonts, text) go into the app when you pack it. Put each one in a `mods` folder in the NSP folder, as Eden or Yuzu load it: `mods/<name>/romfs/<the game's paths>`, for example `mods/PlayStation UI/romfs/Pack/Bootup.pack`. Every build lays their files over the game's (`<id>_build/mods/RomFS.img`, reused while nothing changed), for the Mac app, the IPA and a separate RomFS alike; the script names each mod and how many files it took. Mods apply in name order, a later one winning on the same file; an empty file named `.disabled` in a mod's folder leaves it out. `exefs` patches are not supported, and neither are mods that replace shaders (the shaders are made from the game's own files). Without rebuilding, `DM_ROMFS_OVERLAY=<folder>` in `env.txt` reads files from that folder first (the `romfs` folder itself).
+
 ## On the Mac
 
 A Mac app shows the game's settings in a window before the game starts ([The Mac settings window](settings.md#the-mac-settings-window)). Its `env.txt` is `~/Library/Application Support/nxnative/<title ID>/env.txt`, and its log is `~/Library/Logs/nxnative/<title ID>.log`. [NX2Apple](https://github.com/LNPANDY/NX2Apple)'s library can also start it with the settings you pick there.

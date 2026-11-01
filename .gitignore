@@ -11,3 +11,5 @@ dm/games/*/cb_extent.tsv
 .coverage
 .coverage.*
 /coverage.json
+# Game folders, keys and builds kept in the checkout (game files never go in the repository)
+data/
