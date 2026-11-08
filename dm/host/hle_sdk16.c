@@ -113,26 +113,47 @@ HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine8LoadFontEPcPKvjj", "shared font BFT
     pthread_once(&font_load_once, font_load_init);
     return font_load(self, name, font_payload(data), index, capacity);
 }
-// A game sizes an engine's work memory for Nintendo's fonts, and the stand-in is far larger: Arial Unicode's 23 MB did not fit the 50 KB Mario Tennis Fever gives its second engine (nn::font's texture
-//   cache keeps one per glyph thread), so FSS_load_font ran out of memory (error 201), SetFont failed with 301, every lookup of the "?" glyph missed and nro0+0xaef8a8 crashed on a null pointer. An engine
-//   gets at least FONT_WORK_MIN of host memory then; the game's buffer stays unused, and GetPointerToWorkBuffer still gives it back, which is what the game frees
-#define FONT_WORK_MIN 0x80000   // what the same game's first engine gets, in which that font loads
+// A game sizes an engine's work memory for the fonts it was made with. The engine keeps its loaded fonts, its glyph cache and each glyph map it hands out in that memory, and a request it cannot place
+//   fails with error 201 (out of memory); a game reads the glyph map AcquireGlyphmap returns without a check. Arial Unicode's 23 MB did not fit the 50 KB Mario Tennis Fever gives its second engine
+//   (nn::font's texture cache keeps one per glyph thread), so FSS_load_font failed with 201, SetFont with 301, every lookup of the "?" glyph missed and nro0+0xaef8a8 crashed on a null pointer.
+//   Donkey Kong Bananza (v458752) draws only its own RomFS fonts and crashed after hours of play at main+0x747d4c: CheckGlyphExist true, AcquireGlyphmap null, GetError 201, a read at 0xe.
+//   That was with an icon-font mod whose glyphs have up to five times the original's outline points. Its glyph maps balance (the counters below), so nothing leaks: the 512 KB engine's cache
+//   filled or fragmented. An engine gets FONT_WORK_SCALE times its size, at least FONT_WORK_MIN, of host memory, room for heavier fonts than the game was sized for (stand-ins, mods). The game's buffer stays unused, and GetPointerToWorkBuffer still gives it back, which is what the game frees
+#define FONT_WORK_MIN 0x80000   // what Mario Tennis Fever's first engine gets, in which Arial Unicode loads
+#define FONT_WORK_SCALE 4
 #define FONT_ENGINES 16
-static struct { void *self, *game, *host; } font_work[FONT_ENGINES];
-HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine10InitializeEPvj", "a work buffer the stand-in font fits in; the engine itself stays in the SDK", void, h_font_Initialize, void *self, void *buf, unsigned size) {
+typedef struct {
+    void *self, *game, *host; size_t game_n, host_n;
+    _Atomic uint64_t acquired, released, failed; _Atomic int64_t held, held_max;
+    _Atomic int32_t scale_x, scale_y;
+} font_engine_t;
+static font_engine_t font_work[FONT_ENGINES];
+static font_engine_t *font_engine(void *self) {   // the engine's slot; NULL when the table is full
+    for (int i = 0; i < FONT_ENGINES; i++) if (font_work[i].self == self) return &font_work[i];
+    return NULL;
+}
+static void font_stats_log(const char *why) {
+    for (int i = 0; i < FONT_ENGINES && font_work[i].self; i++) {
+        font_engine_t *e = &font_work[i];
+        LOG("[font] %s: engine %d %p work %zu KB (game %zu KB): glyph maps acquired %llu released %llu held %lld (most %lld) failed %llu", why, i, e->self, (e->host_n ? e->host_n : e->game_n) >> 10, e->game_n >> 10,
+            (unsigned long long)e->acquired, (unsigned long long)e->released, (long long)e->held, (long long)e->held_max, (unsigned long long)e->failed);
+    }
+}
+HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine10InitializeEPvj", "a work buffer the stand-in font and the game's glyph maps fit in; the engine itself stays in the SDK", void, h_font_Initialize, void *self, void *buf, unsigned size) {
     static void (*init)(void *, void *, unsigned);
     if (!init) init = guest_sym("_ZN2nn6fontll18ScalableFontEngine10InitializeEPvj");
-    if (size < FONT_WORK_MIN) {
-        pthread_mutex_lock(&font_mu);
-        int i = 0;
-        while (i < FONT_ENGINES && font_work[i].self && font_work[i].self != self) i++;
-        if (i < FONT_ENGINES) {
-            if (!font_work[i].host && !(font_work[i].host = malloc(FONT_WORK_MIN))) die("font engine work memory");
-            font_work[i].self = self; font_work[i].game = buf;
-            buf = font_work[i].host; size = FONT_WORK_MIN;
-        } else LOG("[RED] more than %d font engines with a small work buffer: this one keeps the game's", FONT_ENGINES);
-        pthread_mutex_unlock(&font_mu);
-    }
+    size_t want = (size_t)size * FONT_WORK_SCALE; if (want < FONT_WORK_MIN) want = FONT_WORK_MIN; if (want > 0xffffffffu) want = 0xffffffffu;
+    pthread_mutex_lock(&font_mu);
+    font_engine_t *e = font_engine(self); if (!e) e = font_engine(NULL);
+    if (e) {
+        if (e->host && e->host_n < want) { free(e->host); e->host = NULL; }   // a re-initialized engine no longer uses its old memory
+        if (!e->host && !(e->host = calloc(1, want))) die("font engine work memory");
+        if (e->host_n < want) e->host_n = want;
+        e->self = self; e->game = buf; e->game_n = size;
+        buf = e->host; size = (unsigned)e->host_n;
+    } else LOG("[RED] more than %d font engines: this one keeps the game's work memory (%u KB)", FONT_ENGINES, size >> 10);
+    pthread_mutex_unlock(&font_mu);
+    if (e) LOG("[font] engine %p: work memory %u KB of the host's (the game's %zu KB)", self, size >> 10, e->game_n >> 10);
     init(self, buf, size);
 }
 HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine22GetPointerToWorkBufferEv", "the game's own buffer, also when the engine runs on host memory", void *, h_font_WorkBuffer, void *self) {
@@ -140,9 +161,45 @@ HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine22GetPointerToWorkBufferEv", "the ga
     if (!get) get = guest_sym("_ZN2nn6fontll18ScalableFontEngine22GetPointerToWorkBufferEv");
     void *game = NULL;
     pthread_mutex_lock(&font_mu);
-    for (int i = 0; i < FONT_ENGINES && font_work[i].self; i++) if (font_work[i].self == self) game = font_work[i].game;
+    font_engine_t *e = font_engine(self); if (e && self) game = e->game;
     pthread_mutex_unlock(&font_mu);
     return game ? game : get(self);
+}
+HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine8SetScaleEiiii", "records the scale for the glyph map counters; the engine itself stays in the SDK", void, h_font_SetScale, void *self, int sx, int a, int b, int sy) {
+    static void (*f)(void *, int, int, int, int);
+    if (!f) f = guest_sym("_ZN2nn6fontll18ScalableFontEngine8SetScaleEiiii");
+    font_engine_t *e = self ? font_engine(self) : NULL;
+    if (e) { e->scale_x = sx; e->scale_y = sy; }
+    f(self, sx, a, b, sy);
+}
+// Every glyph map an engine hands out lives in its work memory until ReleasesGlyph: the counters show whether glyph maps stay held (a leak) or the memory runs out with few held (fragmentation).
+//   A summary every 10 minutes, at each new most-held power of two, and on a failure with the glyph, its scale and the engine's error
+HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine15AcquireGlyphmapEjt", "counts glyph maps and logs a failure; the engine itself stays in the SDK", void *, h_font_AcquireGlyphmap, void *self, unsigned id, unsigned short type) {
+    static void *(*f)(void *, unsigned, unsigned short); static int (*err)(void *); static _Atomic uint64_t next_ns;
+    if (!f) { f = guest_sym("_ZN2nn6fontll18ScalableFontEngine15AcquireGlyphmapEjt"); err = guest_sym("_ZN2nn6fontll18ScalableFontEngine8GetErrorEv"); }
+    void *r = f(self, id, type);
+    font_engine_t *e = self ? font_engine(self) : NULL;
+    if (!e) return r;
+    if (r) {
+        e->acquired++; int64_t h = ++e->held, m = e->held_max;
+        while (h > m && !atomic_compare_exchange_weak(&e->held_max, &m, h)) {}
+        if (h > m && h >= 64 && !(h & (h - 1))) font_stats_log("glyph maps held");
+    } else {
+        e->failed++;
+        LOG("[RED] [font] engine %p: AcquireGlyphmap(glyph %u, type %u) at scale %.2f x %.2f failed with error %d; the game reads the null glyph map", self, id, type,
+            e->scale_x / 65536.0, e->scale_y / 65536.0, err ? err(self) : -1);
+        font_stats_log("glyph map failed");
+    }
+    uint64_t t = now_ns(), n = next_ns;
+    if (t >= n && atomic_compare_exchange_strong(&next_ns, &n, t + 600000000000ull) && n) font_stats_log("10 minutes");
+    return r;
+}
+HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine13ReleasesGlyphEPv", "counts glyph maps; the engine itself stays in the SDK", void, h_font_ReleasesGlyph, void *self, void *glyph) {
+    static void (*f)(void *, void *);
+    if (!f) f = guest_sym("_ZN2nn6fontll18ScalableFontEngine13ReleasesGlyphEPv");
+    font_engine_t *e = self && glyph ? font_engine(self) : NULL;
+    if (e) { e->released++; e->held--; }
+    f(self, glyph);
 }
 // The address points straight at the TTF (past the 8-byte header) and the size excludes the header, except for a game on SDK 11 or later whose main imports ScalableFontEngineHelper::Decode
 //   (dm_sdk_major, dm_game_imports; the profile's shared_font overrides). Super Mario 3D World + Bowser's Fury (SDK 10) records shared fonts as type 0 (main+0x975658), calls no Decode and hands the address
